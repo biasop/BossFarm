@@ -1,7 +1,10 @@
 package com.bossfarm.backend.service.impl;
 
+import java.util.List;
 import java.util.UUID;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.bossfarm.backend.repository.ProductRepository;
@@ -10,6 +13,7 @@ import lombok.RequiredArgsConstructor;
 import com.bossfarm.backend.model.Product;
 import com.bossfarm.backend.dto.ProductRequest;
 import com.bossfarm.backend.dto.ProductResponse;
+import com.bossfarm.backend.exception.ResourceNotFoundException;
 
 @Service
 @RequiredArgsConstructor
@@ -88,8 +92,134 @@ public class ProductServiceImpl implements ProductService {
      * ra)
      * 
      */
+    @Override
+    @Transactional
     public ProductResponse updateProduct(UUID id, ProductRequest request) {
-        return null;
+        Product product = productRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Product", "id", id));
+
+        if (!product.getSlug().equals(request.getSlug()) && productRepository.existsBySlug(request.getSlug())) {
+            throw new IllegalArgumentException("Slug '" + request.getSlug() + "' đã được sử dụng bởi sản phẩm khác!");
+        }
+        product.setName(request.getName());
+        product.setSlug(request.getSlug());
+        product.setThumbnailUrl(request.getThumbnailUrl());
+        product.setPrice(request.getPrice());
+        product.setComposition(request.getComposition());
+        product.setBenefits(request.getBenefits());
+        product.setUsageInstructions(request.getUsageInstructions());
+        product.setStorageWarnings(request.getStorageWarnings());
+
+        if (request.getIsFeatured() != null) {
+            product.setIsFeatured(request.getIsFeatured());
+        }
+        if (request.getIsActive() != null) {
+            product.setIsActive(request.getIsActive());
+        }
+
+        // Lưu lại (Hibernate sẽ tự kích hoạt @UpdateTimestamp để cập nhật thời gian
+        // updatedAt)
+        Product updatedProduct = productRepository.save(product);
+        return mapToResponse(updatedProduct);
     }
 
+    @Override
+    @Transactional
+    public void deleteProduct(UUID id) {
+        if (!productRepository.existsById(id)) {
+            throw new ResourceNotFoundException("Product", "id", id);
+        }
+        productRepository.deleteById(id);
+    }
+
+    @Override
+    public boolean existsById(UUID id) {
+        return productRepository.existsById(id);
+    }
+
+    @Override
+    public boolean existsBySlug(String slug) {
+        return productRepository.existsBySlug(slug);
+    }
+
+    @Override
+    public ProductResponse getProductById(UUID id) {
+        Product product = productRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Product", "id", id));
+        return mapToResponse(product);
+    }
+
+    @Override
+    public ProductResponse getProductBySlug(String slug) {
+        Product product = productRepository.findBySlug(slug)
+                .orElseThrow(() -> new ResourceNotFoundException("Product", "slug", slug));
+        return mapToResponse(product);
+    }
+
+    @Override
+    public Page<ProductResponse> getAllProducts(Pageable pageable) {
+        return productRepository.findByIsActiveTrue(pageable).map(this::mapToResponse);
+    }
+
+    /*
+     * [1. Client gửi yêu cầu] ──► Ví dụ: "Lấy trang 0, mỗi trang 10 sản phẩm"
+     * │
+     * ▼
+     * [2. productRepository.findByIsActiveTrue(pageable)]
+     * │ • Database chạy SQL: SELECT ... LIMIT 10 OFFSET 0
+     * │ • Database chạy đếm: SELECT COUNT(*) ...
+     * ▼
+     * [3. Trả về đối tượng Page<Product>]
+     * │ • Bên trong chứa: 10 Entity Product
+     * │ • Kèm Metadata: totalElements = 100, totalPages = 10, currentPage = 0
+     * ▼
+     * [4. .map(this::mapToResponse)]
+     * │ • Lấy từng Product (1, 2, ..., 10) ──► Chuyển thành ProductResponse (1, 2,
+     * ..., 10)
+     * │ • Giữ nguyên thông tin Metadata phân trang
+     * ▼
+     * [5. Trả về đối tượng Page<ProductResponse>]
+     * │
+     * ▼
+     * [6. Gửi về Frontend dạng JSON]
+     * 
+     */
+    @Override
+    public List<ProductResponse> getFeaturedProducts() {
+        return productRepository.findByIsFeaturedTrueAndIsActiveTrue().stream().map(this::mapToResponse).toList();
+    }
+
+    /*
+     * [1. Gọi Repository lấy dữ liệu từ DB]
+     * │ • Database chạy SQL: SELECT * FROM products WHERE is_featured = true AND
+     * is_active = true;
+     * │ • Trả về: List<Product> (Tập hợp các Entity gốc)
+     * ▼
+     * [2. .stream()]
+     * │ • Mở một dòng chảy dữ liệu (Băng chuyền xử lý)
+     * │ • Đưa từng phần tử Product vào luồng xử lý tuần tự
+     * ▼
+     * [3. .map(this::mapToResponse)] <-- Intermediate Operation (Khâu trung gian)
+     * │ • Từng Product đi qua khâu này: Product ──► mapToResponse() ──►
+     * ProductResponse
+     * │ • Đầu ra của khâu này là một luồng Stream<ProductResponse>
+     * ▼
+     * [4. .toList()] <-- Terminal Operation (Khâu đóng gói kết thúc)
+     * │ • Kích hoạt toàn bộ luồng Stream chạy
+     * │ • Thu gom tất cả các phần tử ProductResponse lại
+     * │ • Đóng gói thành một danh sách mới: List<ProductResponse>
+     * ▼
+     * [5. Controller nhận List<ProductResponse> & Trả về JSON cho Frontend]
+     * Ví dụ: [ { "name": "SP 1", "isFeatured": true }, { "name": "SP 2",
+     * "isFeatured": true } ]
+     */
+
+    @Override
+    public Page<ProductResponse> searchProducts(String keyword, Pageable pageable) {
+        if (keyword == null || keyword.isBlank()) {
+            return getAllProducts(pageable);
+        }
+        return productRepository.findByNameContainingIgnoreCaseAndIsActiveTrue(keyword.trim(), pageable)
+                .map(this::mapToResponse);
+    }
 }
